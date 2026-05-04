@@ -61,7 +61,24 @@ install(PROGRAMS
   arm_control/ps5_cartesian_ik_teleop.py
   arm_control/logitech_joystick_ik.py
   arm_control/joint_state_offset.py
+  arm_control/mediapipe_ik_teleop.py
   DESTINATION lib/${PROJECT_NAME}
+)
+
+find_package(ament_cmake_python REQUIRED)
+
+# Install Python package
+ament_python_install_package(${PROJECT_NAME})
+
+# Install models (for hand track)
+install(
+  DIRECTORY models/
+  DESTINATION share/${PROJECT_NAME}/models
+)
+
+install(
+  FILES resource/${PROJECT_NAME}
+  DESTINATION share/ament_index/resource_index/packages
 )
 
 ament_package()

@@ -1,44 +1,19 @@
 #!/usr/bin/env python3
 import os
-import sys
-import termios
-import tty
-import select
 import numpy as np
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
 from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import PoseStamped
 
 from ikpy.chain import Chain
 
 
-HELP = """
-Cartesian IK teleop (press, no Enter):
-  +X / -X :  i / k
-  +Y / -Y :  j / l
-  +Z / -Z :  o / p
-
-  Step size: [ decrease   ] increase
-  Reset target: 0
-  Quit: x
-
-Notes:
-- Publishes joint positions (rad) to /arm_forward_controller/commands
-- Target is clamped to a small safe workspace box
-"""
-
-
-def get_key(timeout=0.1):
-    rlist, _, _ = select.select([sys.stdin], [], [], timeout)
-    if rlist:
-        return sys.stdin.read(1)
-    return None
-
-
 def clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
+
 
 
 class CartesianIKTeleop(Node):
@@ -46,6 +21,7 @@ class CartesianIKTeleop(Node):
         super().__init__("mini_arm_cartesian_ik_teleop")
 
         self.pub = self.create_publisher(Float64MultiArray, "/arm_forward_controller/commands", 10)
+        self.sub = self.create_subscription(PoseStamped, "/position_topic", self.target_cb, 10)
 
         pkg = get_package_share_directory("arm_description")
         self.urdf_path = os.path.join(pkg, "urdf", "mini_arm.urdf")
@@ -93,8 +69,36 @@ class CartesianIKTeleop(Node):
         self.limits_lo = np.array([-1.57] * 6, dtype=float)
         self.limits_hi = np.array([ 1.57] * 6, dtype=float)
 
-        self.get_logger().info(HELP)
         self.print_state()
+
+
+
+    def remap(self, value, in_min, in_max, out_min, out_max):
+        return out_min + (value - in_min) * (out_max - out_min) / (in_max - in_min)
+
+    def target_cb(self, msg: PoseStamped):
+        xmin = 0.1
+        xmax = 0.9
+
+        ymin = 0.05
+        ymax = 0.95
+
+        zmin = -0.012
+        zmax = -0.1
+
+        self.target[0] = self.remap(msg.pose.position.x, xmin, xmax, -0.3, 0.3)
+        self.target[1] = self.remap(msg.pose.position.z, zmin, zmax, -0.3, 0.3)
+        self.target[2] = self.remap(msg.pose.position.y, ymax, ymin, 0, 0.3)
+        self.clamp_target()
+
+        try:
+            q6 = self.solve_ik()
+            self.q = np.array(q6, dtype=float)
+            self.publish(self.q)
+            self.print_state()
+        except Exception as e:
+            self.get_logger().error(f"IK failed: {e}")
+
 
     def print_state(self):
         self.get_logger().info(
@@ -146,89 +150,13 @@ class CartesianIKTeleop(Node):
 
         return q_phys
 
-
-    def apply_key(self, k: str):
-        moved = False
-
-        if k == "x":
-            self.get_logger().info("Exiting teleop.")
-            rclpy.shutdown()
-            return
-
-        if k == "0":
-            self.target = np.array([0.10, 0.00, 0.20], dtype=float)
-            moved = True
-
-        elif k == "[":
-            self.step = max(0.002, self.step / 1.25)
-            self.print_state()
-            return
-
-        elif k == "]":
-            self.step = min(0.05, self.step * 1.25)
-            self.print_state()
-            return
-
-        elif k == "i":
-            self.target[0] += self.step
-            moved = True
-        elif k == "k":
-            self.target[0] -= self.step
-            moved = True
-        elif k == "j":
-            self.target[1] += self.step
-            moved = True
-        elif k == "l":
-            self.target[1] -= self.step
-            moved = True
-        elif k == "o":
-            self.target[2] += self.step
-            moved = True
-        elif k == "p":
-            self.target[2] -= self.step
-            moved = True
-
-        if not moved:
-            return
-
-        self.clamp_target()
-        self.print_state()
-
-        try:
-            q6 = self.solve_ik()
-            self.q = np.array(q6, dtype=float)
-            self.publish(self.q)
-        except Exception as e:
-            self.get_logger().error(f"IK failed: {e}")
-
-
 def main():
     rclpy.init()
     node = CartesianIKTeleop()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
-    old = termios.tcgetattr(sys.stdin)
-    try:
-        tty.setcbreak(sys.stdin.fileno())
-        node.get_logger().info("Focus this terminal and press keys (no Enter).")
-
-        # Publish initial pose
-        try:
-            node.q = node.solve_ik()
-            node.publish(node.q)
-        except Exception as e:
-            node.get_logger().warn(f"Initial IK failed: {e}")
-
-        while rclpy.ok():
-            rclpy.spin_once(node, timeout_sec=0.0)
-            k = get_key(0.1)
-            if not k:
-                continue
-            node.apply_key(k)
-
-    finally:
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
-        node.destroy_node()
-        rclpy.shutdown()
 
 
 if __name__ == "__main__":
